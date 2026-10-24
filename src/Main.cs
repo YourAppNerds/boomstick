@@ -63,12 +63,12 @@ public partial class Main : Node3D
         SetupHint();
         UpdateStressStat();
 
-        // Do not touch RenderingServer from C# here: on the web template its static constructor
-        // throws NativeMethodBindNotFoundException (get_video_adapter_type hash mismatch, because
-        // the web build has rendering_device disabled). See logs/step7d1-report.md.
+        // RenderingServer is usable from C# on web since engine commit 11875322e9 (step 7e); before
+        // that its static constructor threw NativeMethodBindNotFoundException (logs/step7d1-report.md).
+        // The adapter name in the READY line doubles as a check.
         GD.Print($"BOOMSTICK READY ({OS.GetName()}, " +
                  $".NET {System.Environment.Version}, map {_level.Width}x{_level.Depth}, {_level.OpenCells.Count} open cells, " +
-                 $"{Game.TotalEnemies} enemies)");
+                 $"{Game.TotalEnemies} enemies, GPU {RenderingServer.GetVideoAdapterName()})");
 
         ApplyDevArgs();
 
@@ -160,6 +160,9 @@ public partial class Main : Node3D
             VerticalAlignment = VerticalAlignment.Center,
             MouseFilter = Control.MouseFilterEnum.Ignore,
         };
+        if (DisplayServer.IsTouchscreenAvailable())
+            _hint.Text += "\n\nTouch screen detected: touch controls are coming in the next update.\n" +
+                          "For now, Boomstick needs a keyboard and mouse.";
         _hint.AddThemeFontSizeOverride("font_size", 22);
         _hint.AddThemeColorOverride("font_outline_color", Colors.Black);
         _hint.AddThemeConstantOverride("outline_size", 6);

@@ -15,6 +15,8 @@ if [ ! -x "$GODOT" ]; then
 fi
 
 mkdir -p "$OUT"
+# Keep Godot from importing (and exporting) anything under build/: logs, screenshots, movie frames.
+touch "$ROOT/build/.gdignore"
 rm -f "$OUT"/*
 
 echo "== import + build solutions"
