@@ -68,7 +68,7 @@ public partial class Main : Node3D
         // The adapter name in the READY line doubles as a check.
         GD.Print($"BOOMSTICK READY ({OS.GetName()}, " +
                  $".NET {System.Environment.Version}, map {_level.Width}x{_level.Depth}, {_level.OpenCells.Count} open cells, " +
-                 $"{Game.TotalEnemies} enemies, GPU {RenderingServer.GetVideoAdapterName()})");
+                 $"{Game.TotalEnemies} enemies, level mesh {_level.VertexCount} verts, GPU {RenderingServer.GetVideoAdapterName()})");
 
         ApplyDevArgs();
 

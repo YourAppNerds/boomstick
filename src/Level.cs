@@ -5,16 +5,15 @@ using Godot;
 namespace Boomstick;
 
 /// <summary>
-/// Builds the level from an ASCII map. Geometry is merged into one ArrayMesh per 8x8-cell
-/// chunk (one surface per material), so the whole map costs a few dozen draw calls and each
-/// chunk only receives the lights near it (the compatibility renderer caps lights per object).
-/// Collision is one StaticBody3D with a box per exposed wall cell plus floor and ceiling slabs.
+/// Builds the level from an ASCII map. All static geometry is merged into a single mesh with one
+/// material (textures in a Texture2DArray, lamp lighting baked into vertex colours), so the whole
+/// level is one draw call and needs no real-time lamp lights. Collision is one StaticBody3D with a
+/// box per exposed wall cell plus floor and ceiling slabs.
 /// </summary>
 public partial class Level : Node3D
 {
     public const float Cell = 2f;
     public const float Height = 3f;
-    private const int Chunk = 8;
 
     // Legend:
     //   walls:    # stone   B brick   M metal   (space) solid void
@@ -77,8 +76,6 @@ BBBBBBBBBB..BBBBBBBBBB##########
     private readonly List<Vector2I> _lamps = new();
     private readonly List<Vector2I> _exits = new();
     private readonly List<(char, Vector2I)> _spawns = new();
-
-    private StandardMaterial3D _stone, _brick, _metal, _floor, _tiles, _ceiling, _lamp, _exit;
 
     public const string SpawnChars = "fiOhmaAcsrGR";
 
@@ -192,10 +189,8 @@ BBBBBBBBBB..BBBBBBBBBB##########
         }
 
         ComputeLight();
-        CreateMaterials();
         BuildMeshes();
         BuildCollision();
-        BuildLights();
     }
 
     private void ComputeLight()
@@ -220,97 +215,165 @@ BBBBBBBBBB..BBBBBBBBBB##########
         }
     }
 
-    private static StandardMaterial3D Mat(Texture2D tex, bool unshaded = false) => new()
-    {
-        AlbedoTexture = tex,
-        TextureFilter = BaseMaterial3D.TextureFilterEnum.NearestWithMipmaps,
-        ShadingMode = unshaded ? BaseMaterial3D.ShadingModeEnum.Unshaded : BaseMaterial3D.ShadingModeEnum.PerPixel,
-        Roughness = 1f,
-        MetallicSpecular = 0.1f,
-    };
+    // Texture layers of the level's Texture2DArray.
+    private const int TexStone = 0, TexBrick = 1, TexMetal = 2, TexFloor = 3, TexTiles = 4, TexCeiling = 5, TexLamp = 6, TexExit = 7;
 
-    private void CreateMaterials()
+    /// <summary>
+    /// The whole level is one surface with one material: the textures are layers of a
+    /// Texture2DArray (layer index in UV2.x), and the lamp lighting is baked into vertex colours,
+    /// stored at half scale so values up to 2 survive the 8-bit colour format. The baked light goes
+    /// out as EMISSION, so the base pass needs no lights at all. The shader stays lit so that the
+    /// dynamic muzzle flash and explosion lights still add on top while they are visible.
+    /// </summary>
+    private const string LevelShader = @"
+shader_type spatial;
+render_mode diffuse_lambert, specular_disabled, ambient_light_disabled;
+uniform sampler2DArray textures : source_color, filter_nearest_mipmap, repeat_enable;
+void fragment() {
+	vec3 t = texture(textures, vec3(UV, UV2.x)).rgb;
+	ALBEDO = t;
+	EMISSION = t * COLOR.rgb * 2.0;
+}
+";
+
+    // Baked light model: the D2 scene lighting, evaluated per vertex with Godot's omni light
+    // falloff (no shadows, like the real-time lights it replaces).
+    private static readonly Color AmbientLight = new Color(0.55f, 0.5f, 0.48f) * 0.5f;
+    private static readonly Color LampColor = new Color(1f, 0.85f, 0.65f) * 1.8f;
+    private const float LampRange = 10f, LampDecay = 1.2f;
+    private static readonly Color ExitColor = new Color(0.4f, 1f, 0.45f) * 1.5f;
+    private const float ExitRange = 8f, ExitDecay = 1f;
+
+    private readonly List<(Vector3 Pos, Color Color, float Range, float Decay)> _bakeLights = new();
+
+    // Mesh arrays, filled by Face() and committed once in BuildMeshes().
+    private readonly List<Vector3> _verts = new();
+    private readonly List<Vector3> _normals = new();
+    private readonly List<Vector2> _uvs = new();
+    private readonly List<Vector2> _uv2s = new();
+    private readonly List<Color> _colors = new();
+    private readonly List<int> _indices = new();
+
+    private static float OmniAttenuation(float distance, float range, float decay)
     {
-        _stone = Mat(ProcTex.Stone());
-        _brick = Mat(ProcTex.Brick());
-        _metal = Mat(ProcTex.Metal());
-        _floor = Mat(ProcTex.Floor());
-        _tiles = Mat(ProcTex.Tiles());
-        _ceiling = Mat(ProcTex.Ceiling());
-        _lamp = Mat(ProcTex.Lamp(), unshaded: true);
-        _exit = Mat(ProcTex.ExitFloor(), unshaded: true);
+        float nd = distance / range;
+        nd *= nd;
+        nd *= nd;
+        nd = Mathf.Max(1f - nd, 0f);
+        nd *= nd;
+        return nd * Mathf.Pow(Mathf.Max(distance, 0.0001f), -decay);
     }
 
-    private StandardMaterial3D WallMat(char c) => c switch
+    private Color BakedLight(Vector3 p, Vector3 n)
     {
-        'B' => _brick,
-        'M' => _metal,
-        _ => _stone,
+        var c = AmbientLight;
+        foreach (var (pos, color, range, decay) in _bakeLights)
+        {
+            var to = pos - p;
+            float d2 = to.LengthSquared();
+            if (d2 >= range * range) continue;
+            float d = Mathf.Sqrt(d2);
+            float ndl = n.Dot(to) / Mathf.Max(d, 0.0001f);
+            if (ndl <= 0f) continue;
+            c += color * (ndl * OmniAttenuation(d, range, decay));
+        }
+        return c;
+    }
+
+    private void CollectBakeLights()
+    {
+        foreach (var c in _lamps)
+            _bakeLights.Add((CellCenter(c) + new Vector3(0, Height - 0.3f, 0), LampColor, LampRange, LampDecay));
+        if (_exits.Count > 0)
+        {
+            var mid = Vector3.Zero;
+            foreach (var c in _exits) mid += CellCenter(c);
+            _bakeLights.Add((mid / _exits.Count + new Vector3(0, 1.2f, 0), ExitColor, ExitRange, ExitDecay));
+        }
+    }
+
+    private static int WallTex(char c) => c switch
+    {
+        'B' => TexBrick,
+        'M' => TexMetal,
+        _ => TexStone,
     };
 
-    private StandardMaterial3D FloorMat(int x, int z)
+    private int FloorTex(int x, int z)
     {
         char c = At(x, z);
-        if (c == 'X') return _exit;
-        if (c == ',') return _tiles;
-        if (c == '.') return _floor;
+        if (c == 'X') return TexExit;
+        if (c == ',') return TexTiles;
+        if (c == '.') return TexFloor;
         // Lamp, start and spawn cells take the tile floor if any neighbour has tiles.
-        return At(x - 1, z) == ',' || At(x + 1, z) == ',' || At(x, z - 1) == ',' || At(x, z + 1) == ',' ? _tiles : _floor;
+        return At(x - 1, z) == ',' || At(x + 1, z) == ',' || At(x, z - 1) == ',' || At(x, z + 1) == ',' ? TexTiles : TexFloor;
+    }
+
+    private static Texture2DArray LevelTextures()
+    {
+        var images = new Godot.Collections.Array<Image>();
+        foreach (var tex in new[]
+                 {
+                     ProcTex.Stone(), ProcTex.Brick(), ProcTex.Metal(), ProcTex.Floor(), ProcTex.Tiles(),
+                     ProcTex.Ceiling(), ProcTex.Lamp(), ProcTex.ExitFloor(),
+                 })
+            images.Add(tex.GetImage());
+        var array = new Texture2DArray();
+        array.CreateFromImages(images);
+        return array;
     }
 
     private void BuildMeshes()
     {
-        var tools = new Dictionary<StandardMaterial3D, SurfaceTool>();
-        SurfaceTool Tool(StandardMaterial3D m)
+        CollectBakeLights();
+        for (int z = 0; z < Depth; z++)
+        for (int x = 0; x < Width; x++)
         {
-            if (!tools.TryGetValue(m, out var st))
-            {
-                st = new SurfaceTool();
-                st.Begin(Mesh.PrimitiveType.Triangles);
-                st.SetMaterial(m);
-                tools[m] = st;
-            }
-            return st;
+            if (IsSolidCell(x, z)) continue;
+            float x0 = x * Cell, x1 = x0 + Cell, z0 = z * Cell, z1 = z0 + Cell;
+            int floorTex = FloorTex(x, z);
+            bool lamp = At(x, z) == 'L';
+
+            // Floor (normal +Y, seen from above) and ceiling (normal -Y, seen from below).
+            Face(new(x0, 0, z0), new(x1, 0, z0), new(x1, 0, z1), new(x0, 0, z1), Vector3.Up, 1f, 1f,
+                floorTex, fullBright: floorTex == TexExit);
+            Face(new(x1, Height, z0), new(x0, Height, z0), new(x0, Height, z1), new(x1, Height, z1), Vector3.Down, 1f, 1f,
+                lamp ? TexLamp : TexCeiling, fullBright: lamp);
+
+            // Walls: a face wherever a neighbouring cell is solid, facing into this cell.
+            WallFace(x, z, 0, -1);
+            WallFace(x, z, 0, 1);
+            WallFace(x, z, -1, 0);
+            WallFace(x, z, 1, 0);
         }
 
-        for (int cz = 0; cz < Depth; cz += Chunk)
-        for (int cx = 0; cx < Width; cx += Chunk)
+        var arrays = new Godot.Collections.Array();
+        arrays.Resize((int)Mesh.ArrayType.Max);
+        arrays[(int)Mesh.ArrayType.Vertex] = _verts.ToArray();
+        arrays[(int)Mesh.ArrayType.Normal] = _normals.ToArray();
+        arrays[(int)Mesh.ArrayType.TexUV] = _uvs.ToArray();
+        arrays[(int)Mesh.ArrayType.TexUV2] = _uv2s.ToArray();
+        arrays[(int)Mesh.ArrayType.Color] = _colors.ToArray();
+        arrays[(int)Mesh.ArrayType.Index] = _indices.ToArray();
+        var mesh = new ArrayMesh();
+        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        var mat = new ShaderMaterial { Shader = new Shader { Code = LevelShader } };
+        mat.SetShaderParameter("textures", LevelTextures());
+        mesh.SurfaceSetMaterial(0, mat);
+        VertexCount = _verts.Count;
+        AddChild(new MeshInstance3D
         {
-            tools.Clear();
-            for (int z = cz; z < Math.Min(cz + Chunk, Depth); z++)
-            for (int x = cx; x < Math.Min(cx + Chunk, Width); x++)
-            {
-                if (IsSolidCell(x, z)) continue;
-                float x0 = x * Cell, x1 = x0 + Cell, z0 = z * Cell, z1 = z0 + Cell;
-
-                // Floor (normal +Y, seen from above) and ceiling (normal -Y, seen from below).
-                Quad(Tool(FloorMat(x, z)), new(x0, 0, z0), new(x1, 0, z0), new(x1, 0, z1), new(x0, 0, z1),
-                    Vector3.Up, 1f, 1f);
-                Quad(Tool(At(x, z) == 'L' ? _lamp : _ceiling),
-                    new(x1, Height, z0), new(x0, Height, z0), new(x0, Height, z1), new(x1, Height, z1),
-                    Vector3.Down, 1f, 1f);
-
-                // Walls: a face wherever a neighbouring cell is solid, facing into this cell.
-                WallFace(x, z, 0, -1, Tool);
-                WallFace(x, z, 0, 1, Tool);
-                WallFace(x, z, -1, 0, Tool);
-                WallFace(x, z, 1, 0, Tool);
-            }
-
-            if (tools.Count == 0) continue;
-            var mesh = new ArrayMesh();
-            foreach (var st in tools.Values)
-                st.Commit(mesh);
-            AddChild(new MeshInstance3D
-            {
-                Name = $"Chunk_{cx / Chunk}_{cz / Chunk}",
-                Mesh = mesh,
-                CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
-            });
-        }
+            Name = "LevelMesh",
+            Mesh = mesh,
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
+        _verts.Clear(); _normals.Clear(); _uvs.Clear(); _uv2s.Clear(); _colors.Clear(); _indices.Clear();
     }
 
-    private void WallFace(int x, int z, int dx, int dz, Func<StandardMaterial3D, SurfaceTool> tool)
+    /// <summary>Vertices in the merged level mesh (reported in the READY line).</summary>
+    public int VertexCount { get; private set; }
+
+    private void WallFace(int x, int z, int dx, int dz)
     {
         int nx = x + dx, nz = z + dz;
         if (!IsSolidCell(nx, nz)) return;
@@ -320,24 +383,40 @@ BBBBBBBBBB..BBBBBBBBBB##########
         var forward = -normal; // the viewer looks at the wall along this direction
         var right = forward.Cross(Vector3.Up) * (Cell * 0.5f);
         var up = new Vector3(0, Height, 0);
-        Quad(tool(WallMat(At(nx, nz))), center - right + up, center + right + up, center + right, center - right,
-            normal, 1f, Height / Cell);
+        Face(center - right + up, center + right + up, center + right, center - right, normal, 1f, Height / Cell,
+            WallTex(At(nx, nz)), fullBright: false);
     }
 
     /// <summary>
     /// Adds a quad given its corners as seen from the front: top-left, top-right, bottom-right,
-    /// bottom-left. Godot treats clockwise triangles as front-facing.
+    /// bottom-left (Godot treats clockwise triangles as front-facing). The quad is split into a
+    /// grid of roughly 1 m pieces so the per-vertex lighting has enough resolution.
     /// </summary>
-    private static void Quad(SurfaceTool st, Vector3 tl, Vector3 tr, Vector3 br, Vector3 bl, Vector3 n, float uMax, float vMax)
+    private void Face(Vector3 tl, Vector3 tr, Vector3 br, Vector3 bl, Vector3 n, float uMax, float vMax, int layer, bool fullBright)
     {
-        void V(Vector3 p, float u, float v)
+        int nu = Mathf.Max(1, Mathf.RoundToInt(tl.DistanceTo(tr))), nv = Mathf.Max(1, Mathf.RoundToInt(tl.DistanceTo(bl)));
+        int baseIndex = _verts.Count;
+        var uv2 = new Vector2(layer, 0);
+        for (int j = 0; j <= nv; j++)
+        for (int i = 0; i <= nu; i++)
         {
-            st.SetNormal(n);
-            st.SetUV(new Vector2(u, v));
-            st.AddVertex(p);
+            float u = i / (float)nu, v = j / (float)nv;
+            var p = (tl + (tr - tl) * u) + (bl - tl) * v;
+            _verts.Add(p);
+            _normals.Add(n);
+            _uvs.Add(new Vector2(u * uMax, v * vMax));
+            _uv2s.Add(uv2);
+            var light = fullBright ? Colors.White : BakedLight(p, n);
+            _colors.Add(new Color(Mathf.Min(light.R * 0.5f, 1f), Mathf.Min(light.G * 0.5f, 1f), Mathf.Min(light.B * 0.5f, 1f)));
         }
-        V(tl, 0, 0); V(tr, uMax, 0); V(br, uMax, vMax);
-        V(tl, 0, 0); V(br, uMax, vMax); V(bl, 0, vMax);
+        for (int j = 0; j < nv; j++)
+        for (int i = 0; i < nu; i++)
+        {
+            int a = baseIndex + j * (nu + 1) + i; // top-left of this piece
+            int b = a + 1, c = a + nu + 2, d = a + nu + 1;
+            _indices.Add(a); _indices.Add(b); _indices.Add(c);
+            _indices.Add(a); _indices.Add(c); _indices.Add(d);
+        }
     }
 
     private void BuildCollision()
@@ -361,34 +440,5 @@ BBBBBBBBBB..BBBBBBBBBB##########
         var mid = new Vector3(Width * Cell * 0.5f, 0, Depth * Cell * 0.5f);
         body.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = size }, Position = mid + new Vector3(0, -0.5f, 0) });
         body.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = size }, Position = mid + new Vector3(0, Height + 0.5f, 0) });
-    }
-
-    private void BuildLights()
-    {
-        foreach (var c in _lamps)
-        {
-            AddChild(new OmniLight3D
-            {
-                Position = CellCenter(c) + new Vector3(0, Height - 0.3f, 0),
-                LightColor = new Color(1f, 0.85f, 0.65f),
-                LightEnergy = 1.8f,
-                OmniRange = 10f,
-                OmniAttenuation = 1.2f,
-                ShadowEnabled = false,
-            });
-        }
-        if (_exits.Count > 0)
-        {
-            var mid = Vector3.Zero;
-            foreach (var c in _exits) mid += CellCenter(c);
-            AddChild(new OmniLight3D
-            {
-                Position = mid / _exits.Count + new Vector3(0, 1.2f, 0),
-                LightColor = new Color(0.4f, 1f, 0.45f),
-                LightEnergy = 1.5f,
-                OmniRange = 8f,
-                ShadowEnabled = false,
-            });
-        }
     }
 }
