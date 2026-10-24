@@ -45,7 +45,8 @@ public partial class TouchControls : CanvasLayer
     private Vector2 _stickOrigin, _stickPos;
     private int _fireIndex = -1;
 
-    private Texture2D _fireText, _restartText, _againText, _runText;
+    private Texture2D _fireText, _restartText, _againText, _runText, _rotateText;
+    private bool _portrait;
     private readonly Texture2D[] _weaponText = new Texture2D[3];
 
     public override void _Ready()
@@ -60,6 +61,7 @@ public partial class TouchControls : CanvasLayer
         _restartText = Pix.TextTexture("RESTART", light, dark);
         _againText = Pix.TextTexture("PLAY AGAIN", light, dark);
         _runText = Pix.TextTexture("RUN", light, dark);
+        _rotateText = Pix.TextTexture("TURN YOUR PHONE SIDEWAYS", light, dark);
         for (int i = 0; i < 3; i++)
             _weaponText[i] = Pix.TextTexture((i + 1).ToString(), light, dark);
     }
@@ -103,6 +105,11 @@ public partial class TouchControls : CanvasLayer
     private void Press(int index, Vector2 pos)
     {
         _last[index] = pos;
+        if (_portrait)
+        {
+            _roles[index] = Role.Button;
+            return;
+        }
         if (!Game.Started)
         {
             // The first tap dismisses the start screen (the page also goes fullscreen on it).
@@ -210,7 +217,10 @@ public partial class TouchControls : CanvasLayer
     public override void _Process(double delta)
     {
         _size = _surface.GetViewportRect().Size;
-        bool show = Game.TouchMode && Game.Started;
+        // The game is laid out for landscape; in portrait on a touch screen, ask to rotate.
+        _portrait = _size.Y > _size.X && (Game.TouchMode || DisplayServer.IsTouchscreenAvailable());
+        Layer = _portrait ? 30 : 15;
+        bool show = _portrait || (Game.TouchMode && Game.Started);
         if (Visible != show)
         {
             Visible = show;
@@ -221,6 +231,12 @@ public partial class TouchControls : CanvasLayer
 
     private void DrawControls(Control c)
     {
+        if (_portrait)
+        {
+            c.DrawRect(new Rect2(Vector2.Zero, _size), new Color(0f, 0f, 0f, 0.85f));
+            DrawLabel(c, _rotateText, _size / 2f, Mathf.Floor(_size.X * 0.8f / _rotateText.GetWidth()));
+            return;
+        }
         if (ShowRestart)
         {
             var r = RestartRect;

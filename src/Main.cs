@@ -60,6 +60,13 @@ public partial class Main : Node3D
         _dummies = new Node3D { Name = "Dummies" };
         AddChild(_dummies);
 
+        // "?scale=0.5" / "-- --scale=0.5": render the 3D view at a lower resolution (phones with
+        // very high pixel density); the HUD stays sharp.
+        var scale = GetOption("scale");
+        if (scale != null && float.TryParse(scale.TrimStart('='), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out float s3d) && s3d is > 0.2f and <= 1f)
+            GetViewport().Scaling3DScale = s3d;
+
         AddChild(new Hud { Name = "Hud" });
         AddChild(new TouchControls { Name = "TouchControls" });
         _startScreen = new StartScreen { Name = "StartScreen" };
