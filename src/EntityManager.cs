@@ -222,6 +222,7 @@ void fragment() {
         public Vector3 WanderDir;
         public float WanderTimer;
         public float StrafeDir = 1f;
+        public float BlockTime;   // > 0: the straight chase was blocked, follow the path field
         public int Next = -1;     // spatial bucket linked list
     }
 
@@ -290,6 +291,7 @@ void fragment() {
         _dist = new int[cells];
         _queue = new int[cells];
         _bucket = new int[cells];
+        Array.Fill(_bucket, -1);
         _ray = new PhysicsRayQueryParameters3D { CollisionMask = 1 };
         _blastLight = new OmniLight3D
         {
@@ -629,7 +631,11 @@ void fragment() {
     {
         var def = e.Def;
         Vector3 dir;
-        if (e.HasLos && dist < 30f)
+        e.BlockTime -= dt;
+        // With line of sight, head straight for the player, unless that recently got stuck on a
+        // pillar or doorway corner (the sight ray passes, but the body does not).
+        bool direct = e.HasLos && dist < 30f && e.BlockTime <= 0f;
+        if (direct)
         {
             dir = toP / Mathf.Max(dist, 0.001f);
             if (def.Projectile.HasValue && dist < def.KeepDistance)
@@ -671,7 +677,47 @@ void fragment() {
         // Keep out of the player's body.
         if (dist < def.Radius + 0.4f && dist > 0.001f)
             step -= toP / dist * (def.Radius + 0.4f - dist);
+        var before = e.Pos;
         TryMove(e, step, def.Radius);
+
+        if (direct && dir != Vector3.Zero)
+        {
+            float wanted = def.Speed * dt, moved = (e.Pos - before).Length();
+            if (moved < wanted * 0.3f)
+            {
+                e.StrafeDir = -e.StrafeDir;
+                e.BlockTime = Game.RandF(0.6f, 1.2f);
+            }
+        }
+    }
+
+    /// <summary>
+    /// How far a body of radius r at p overlaps living enemies, as a push vector on the XZ plane.
+    /// The player uses it so he can't walk through monsters.
+    /// </summary>
+    public Vector3 Overlap(Vector3 p, float r)
+    {
+        var c = Level.CellOf(p);
+        var push = Vector3.Zero;
+        for (int dz = -1; dz <= 1; dz++)
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            int cx = c.X + dx, cz = c.Y + dz;
+            if (cx < 0 || cz < 0 || cx >= _level.Width || cz >= _level.Depth) continue;
+            // The buckets are rebuilt each _Process; bound-check in case enemies were removed since.
+            for (int j = _bucket[cz * _level.Width + cx]; j >= 0 && j < _enemies.Count; j = _enemies[j].Next)
+            {
+                var o = _enemies[j];
+                if (o.State is EState.Dying or EState.Dead) continue;
+                float ox = p.X - o.Pos.X, oz = p.Z - o.Pos.Z;
+                float min = r + o.Def.Radius;
+                float d2 = ox * ox + oz * oz;
+                if (d2 >= min * min || d2 < 0.0001f) continue;
+                float d = Mathf.Sqrt(d2);
+                push += new Vector3(ox / d, 0, oz / d) * (min - d);
+            }
+        }
+        return push;
     }
 
     private void TryMove(Enemy e, Vector3 step, float r)

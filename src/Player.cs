@@ -150,6 +150,16 @@ public partial class Player : CharacterBody3D
         horiz = horiz.MoveToward(dir * speed, (IsOnFloor() ? GroundAccel : AirAccel) * dt);
         v.X = horiz.X + _knock.X;
         v.Z = horiz.Z + _knock.Z;
+        // Monsters are solid: push out of any we overlap (MoveAndSlide still respects the walls).
+        if (!Dead && Game.Entities != null)
+        {
+            var push = Game.Entities.Overlap(GlobalPosition, 0.35f);
+            if (push != Vector3.Zero)
+            {
+                v.X += push.X * 12f;
+                v.Z += push.Z * 12f;
+            }
+        }
         if (_knock.Y > 0) v.Y = Mathf.Max(v.Y, _knock.Y);
         _knock = Vector3.Zero;
 
