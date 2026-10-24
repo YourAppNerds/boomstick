@@ -25,7 +25,7 @@ public partial class Main : Node3D
     private Player _player;
     private EntityManager _entities;
     private Node3D _dummies;
-    private Label _hint;
+    private StartScreen _startScreen;
     private int _dummyCount;
     private int _stressEnemies;
     private bool _complete;
@@ -60,7 +60,9 @@ public partial class Main : Node3D
         AddChild(_dummies);
 
         AddChild(new Hud { Name = "Hud" });
-        SetupHint();
+        AddChild(new TouchControls { Name = "TouchControls" });
+        _startScreen = new StartScreen { Name = "StartScreen" };
+        AddChild(_startScreen);
         UpdateStressStat();
 
         // RenderingServer is usable from C# on web since engine commit 11875322e9 (step 7e); before
@@ -145,31 +147,6 @@ public partial class Main : Node3D
         AddChild(new WorldEnvironment { Environment = env });
     }
 
-    private void SetupHint()
-    {
-        var layer = new CanvasLayer { Layer = 20 };
-        AddChild(layer);
-        _hint = new Label
-        {
-            Text = "CLICK TO PLAY\n" +
-                   "WASD move   Shift run   Space jump   Mouse / Ctrl fire\n" +
-                   "1-3 or wheel switch weapon   R restart (when dead)   Esc release mouse\n" +
-                   "Find the green exit pad.\n\n" +
-                   "F3 stats   F4 +50 enemies   F6 +50 node dummies   F5 clear",
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            MouseFilter = Control.MouseFilterEnum.Ignore,
-        };
-        if (DisplayServer.IsTouchscreenAvailable())
-            _hint.Text += "\n\nTouch screen detected: touch controls are coming in the next update.\n" +
-                          "For now, Boomstick needs a keyboard and mouse.";
-        _hint.AddThemeFontSizeOverride("font_size", 22);
-        _hint.AddThemeColorOverride("font_outline_color", Colors.Black);
-        _hint.AddThemeConstantOverride("outline_size", 6);
-        _hint.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
-        layer.AddChild(_hint);
-    }
-
     public override void _UnhandledInput(InputEvent e)
     {
         if (e.IsActionPressed("spawn_enemies"))
@@ -178,17 +155,26 @@ public partial class Main : Node3D
             SpawnStress(StressMode.Nodes, StressPerStep);
         else if (e.IsActionPressed("clear_stress"))
             ClearStress();
-        else if (e.IsActionPressed("restart") && (_player.Dead || _complete))
-            GetTree().CallDeferred(SceneTree.MethodName.ReloadCurrentScene);
+        else if (e.IsActionPressed("restart"))
+            Restart();
     }
 
     public override void _Process(double delta)
     {
         long t0 = Perf.Now;
-        _hint.Visible = Input.MouseMode != Input.MouseModeEnum.Captured && !_complete && !_player.Dead;
-        if (!_complete && !_player.Dead)
+        bool playing = !_complete && !_player.Dead;
+        bool waiting = Game.TouchMode ? !Game.Started : Input.MouseMode != Input.MouseModeEnum.Captured;
+        _startScreen.Refresh(playing && waiting, (float)delta);
+        if (playing && Game.Started)
             Game.LevelTime += delta;
         Perf.AddProcess(t0);
+    }
+
+    /// <summary>Reloads the level after death or at the exit (R key or the touch restart button).</summary>
+    public void Restart()
+    {
+        if (_player.Dead || _complete)
+            GetTree().CallDeferred(SceneTree.MethodName.ReloadCurrentScene);
     }
 
     public void CompleteLevel()

@@ -338,14 +338,14 @@ public partial class Hud : CanvasLayer
     {
         _damageAlpha = 0.6f;
         _damageFlash.Visible = true;
-        ShowCenter("YOU DIED", "PRESS R TO RESTART", "", "");
+        ShowCenter("YOU DIED", Game.TouchMode ? "" : "PRESS R TO RESTART", "", "");
     }
 
     public void ShowLevelComplete(double seconds, int kills, int total)
     {
         int m = (int)(seconds / 60), s = (int)(seconds % 60);
         _title.Set("LEVEL COMPLETE", Yellow, YellowDark);
-        ShowCenter(null, $"TIME {m}:{s:00}", $"KILLS {kills} / {total}", "PRESS R TO PLAY AGAIN");
+        ShowCenter(null, $"TIME {m}:{s:00}", $"KILLS {kills} / {total}", Game.TouchMode ? "" : "PRESS R TO PLAY AGAIN");
     }
 
     private void ShowCenter(string title, string a, string b, string c)

@@ -82,6 +82,10 @@ public partial class Player : CharacterBody3D
         long t0 = Perf.Now;
         if (e is InputEventMouseButton { Pressed: true } mb && Input.MouseMode != Input.MouseModeEnum.Captured)
         {
+            // A real mouse click (touch does not emulate the mouse in this project) switches back
+            // to keyboard and mouse controls.
+            Game.TouchMode = false;
+            Game.Started = true;
             Input.MouseMode = Input.MouseModeEnum.Captured;
             _capturedAt = Time.GetTicksMsec();
             GetViewport().SetInputAsHandled();
@@ -92,9 +96,7 @@ public partial class Player : CharacterBody3D
         }
         else if (e is InputEventMouseMotion motion && Input.MouseMode == Input.MouseModeEnum.Captured && !Dead)
         {
-            RotateY(-motion.ScreenRelative.X * MouseSensitivity);
-            _pitch = Mathf.Clamp(_pitch - motion.ScreenRelative.Y * MouseSensitivity, -1.5f, 1.5f);
-            _head.Rotation = new Vector3(_pitch, 0, 0);
+            Look(-motion.ScreenRelative.X * MouseSensitivity, -motion.ScreenRelative.Y * MouseSensitivity);
         }
         else if (e is InputEventMouseButton { Pressed: true } wheel && !Dead)
         {
@@ -110,6 +112,15 @@ public partial class Player : CharacterBody3D
         Perf.AddProcess(t0);
     }
 
+    /// <summary>Turns the view by the given yaw and pitch (radians); used by the mouse and touch look.</summary>
+    public void Look(float yaw, float pitch)
+    {
+        if (Dead) return;
+        RotateY(yaw);
+        _pitch = Mathf.Clamp(_pitch + pitch, -1.5f, 1.5f);
+        _head.Rotation = new Vector3(_pitch, 0, 0);
+    }
+
     public override void _PhysicsProcess(double delta)
     {
         long t0 = Perf.Now;
@@ -123,12 +134,17 @@ public partial class Player : CharacterBody3D
         else if (canAct && Input.IsActionJustPressed("jump"))
             v.Y = JumpVelocity;
 
-        Vector2 input = canAct ? Input.GetVector("move_left", "move_right", "move_forward", "move_back") : Vector2.Zero;
+        Vector2 input = Vector2.Zero;
+        if (canAct)
+        {
+            input = Input.GetVector("move_left", "move_right", "move_forward", "move_back");
+            if (Game.TouchMove != Vector2.Zero) input = Game.TouchMove.LimitLength(1f);
+        }
         Vector3 dir = Transform.Basis * new Vector3(input.X, 0, input.Y);
         dir.Y = 0;
         if (dir.LengthSquared() > 1f) dir = dir.Normalized();
 
-        float speed = Input.IsActionPressed("sprint") ? SprintSpeed : WalkSpeed;
+        float speed = Input.IsActionPressed("sprint") || Game.TouchSprint ? SprintSpeed : WalkSpeed;
         var horiz = new Vector3(v.X, 0, v.Z);
         horiz = horiz.MoveToward(dir * speed, (IsOnFloor() ? GroundAccel : AirAccel) * dt);
         v.X = horiz.X + _knock.X;
@@ -170,7 +186,7 @@ public partial class Player : CharacterBody3D
         {
             _camera.Position = _camera.Position.Lerp(target, Mathf.Min(1f, dt * 12f));
             bool captured = Input.MouseMode == Input.MouseModeEnum.Captured;
-            bool fire = !Game.Frozen && (AutoFire ||
+            bool fire = !Game.Frozen && (AutoFire || Game.TouchFire ||
                 (captured && Input.IsActionPressed("fire") && Time.GetTicksMsec() - _capturedAt > 250));
             Weapons.Update(dt, fire);
         }

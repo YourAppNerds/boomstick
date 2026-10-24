@@ -138,6 +138,18 @@ public static class Game
     /// <summary>Set when the level is complete; enemies stop and the player can't act.</summary>
     public static bool Frozen;
 
+    /// <summary>
+    /// Touch controls are in use (set by the first touch, cleared by a real mouse click). Kept
+    /// across restarts, like <see cref="Started"/> (the start screen has been dismissed).
+    /// </summary>
+    public static bool TouchMode;
+    public static bool Started;
+
+    /// <summary>Touch input for the player, written by <see cref="TouchControls"/>.</summary>
+    public static Vector2 TouchMove;
+    public static bool TouchFire;
+    public static bool TouchSprint;
+
     public static int Kills;
     public static int TotalEnemies;
     public static double LevelTime;
@@ -149,6 +161,9 @@ public static class Game
     public static void Reset()
     {
         Frozen = false;
+        TouchMove = Vector2.Zero;
+        TouchFire = false;
+        TouchSprint = false;
         Kills = 0;
         TotalEnemies = 0;
         LevelTime = 0;

@@ -110,6 +110,8 @@ public partial class DebugOverlay : CanvasLayer
         _label.AddThemeColorOverride("font_color", new Color(0.6f, 1f, 0.6f));
         _panel.AddChild(_label);
         AddChild(_panel);
+        // Hidden in normal play; "?stats" (web) or "-- --stats" (desktop) and the stress runs show it.
+        _panel.Visible = Main.GetOption("stats") != null || Main.GetOption("autostress") != null;
 
         _probe = new FrameProbe { Name = "FrameProbe" };
         AddChild(_probe);
@@ -170,11 +172,16 @@ public partial class DebugOverlay : CanvasLayer
         _bench.AddCpu(cpu, render);
     }
 
+    public static void Toggle()
+    {
+        if (Instance != null) Instance._panel.Visible = !Instance._panel.Visible;
+    }
+
     public override void _Input(InputEvent e)
     {
         if (e is InputEventKey { Pressed: true, Echo: false } k && k.PhysicalKeycode == Key.F3)
         {
-            _panel.Visible = !_panel.Visible;
+            Toggle();
             GetViewport().SetInputAsHandled();
         }
     }
