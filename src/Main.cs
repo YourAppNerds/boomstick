@@ -293,7 +293,7 @@ public partial class Main : Node3D
         {
             var search = JavaScriptBridge.Eval("window.location.search", true).AsString() ?? "";
             spec = QueryValue(search, "autostress");
-            modeSpec ??= QueryValue(search, "stressmode");
+            modeSpec ??= QueryValue(search, "stressmode")?.TrimStart('=');
         }
         mode = modeSpec switch
         {
