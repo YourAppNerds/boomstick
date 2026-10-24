@@ -64,6 +64,8 @@ fi
 find "$WT" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 cp build/web/* "$WT/"
 touch "$WT/.nojekyll"
+# Store the build byte for byte: no line-ending conversion of index.js or index.html.
+echo '* -text' > "$WT/.gitattributes"
 
 git -C "$WT" add -A .
 if git -C "$WT" diff --cached --quiet; then
