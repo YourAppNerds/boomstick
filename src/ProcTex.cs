@@ -110,6 +110,18 @@ public static class ProcTex
         return new Color(1f - n, 0.95f - n, 0.75f - n);
     });
 
+    /// <summary>Glowing green exit pad with chevrons.</summary>
+    public static ImageTexture ExitFloor() => Make(Size, Size, (x, y) =>
+    {
+        int lx = x % 32, ly = y % 32;
+        if (lx < 2 || ly < 2 || lx > 29 || ly > 29) return new Color(0.15f, 0.3f, 0.15f);
+        // Chevron pointing "up" the texture.
+        int d = Math.Abs(lx - 16);
+        bool chevron = ly - 6 >= d / 1 - 2 && ly - 6 <= d + 4 && ly < 26;
+        float n = Rand(x, y, 91) * 0.15f;
+        return chevron ? new Color(0.75f - n, 1f - n, 0.6f - n) : new Color(0.1f + n, 0.55f - n, 0.15f);
+    });
+
     /// <summary>32x32 imp-like blob with transparent background for billboard dummies.</summary>
     public static ImageTexture Dummy() => Make(32, 32, (x, y) =>
     {
