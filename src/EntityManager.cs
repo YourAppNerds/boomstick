@@ -18,8 +18,9 @@ namespace Boomstick;
 /// Rendering: by default enemies are drawn batched, one MultiMeshInstance3D per enemy type
 /// with a fixed-Y billboard shader; the atlas frame and light level go in INSTANCE_CUSTOM and
 /// the whole instance buffer is uploaded with one call per type per frame. That is 3 draw calls
-/// for any number of enemies. With <see cref="Batched"/> off each enemy is its own Sprite3D
-/// (one draw call each in the compatibility renderer), kept for comparison.
+/// for any number of enemies. Projectiles are batched the same way (one MultiMesh per kind).
+/// With <see cref="Batched"/> off each enemy and projectile is its own Sprite3D (one draw call
+/// each in the compatibility renderer), kept for comparison.
 /// </summary>
 public partial class EntityManager : Node3D
 {
@@ -41,6 +42,20 @@ public partial class EntityManager : Node3D
     private const int FloatsPerInstance = 16; // 12 transform + 4 custom
     private readonly Batch[] _batches = new Batch[3];
 
+    private readonly Batch[] _projBatches = new Batch[3];
+
+    // Fixed-Y billboard (enemies), same maths as BaseMaterial3D's BILLBOARD_FIXED_Y.
+    private const string FixedYBillboard = @"
+	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(
+		vec4(normalize(cross(vec3(0.0, 1.0, 0.0), INV_VIEW_MATRIX[2].xyz)), 0.0),
+		vec4(0.0, 1.0, 0.0, 0.0),
+		vec4(normalize(cross(INV_VIEW_MATRIX[0].xyz, vec3(0.0, 1.0, 0.0))), 0.0),
+		MODEL_MATRIX[3]);";
+
+    // Full billboard (projectiles), same maths as BaseMaterial3D's BILLBOARD_ENABLED.
+    private const string FullBillboard = @"
+	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(INV_VIEW_MATRIX[0], INV_VIEW_MATRIX[1], INV_VIEW_MATRIX[2], MODEL_MATRIX[3]);";
+
     private const string BillboardShader = @"
 shader_type spatial;
 render_mode unshaded, cull_disabled;
@@ -48,13 +63,9 @@ uniform sampler2D atlas : source_color, filter_nearest;
 uniform float frames = 9.0;
 varying vec3 tint;
 void vertex() {
-	// Fixed-Y billboard, same maths as BaseMaterial3D's BILLBOARD_FIXED_Y.
-	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(
-		vec4(normalize(cross(vec3(0.0, 1.0, 0.0), INV_VIEW_MATRIX[2].xyz)), 0.0),
-		vec4(0.0, 1.0, 0.0, 0.0),
-		vec4(normalize(cross(INV_VIEW_MATRIX[0].xyz, vec3(0.0, 1.0, 0.0))), 0.0),
-		MODEL_MATRIX[3]);
+	BILLBOARD
 	MODELVIEW_NORMAL_MATRIX = mat3(MODELVIEW_MATRIX);
+	// INSTANCE_CUSTOM: x = atlas frame, y = light level, z = green/blue factor (pain flash).
 	UV.x = (UV.x + INSTANCE_CUSTOM.x) / frames;
 	tint = vec3(INSTANCE_CUSTOM.y, INSTANCE_CUSTOM.y * INSTANCE_CUSTOM.z, INSTANCE_CUSTOM.y * INSTANCE_CUSTOM.z);
 }
@@ -66,22 +77,21 @@ void fragment() {
 }
 ";
 
-    private static Shader _billboardShader;
+    private static Shader _fixedYShader, _fullShader;
 
-    private Batch GetBatch(EnemyKind kind)
+    private Batch MakeBatch(string name, Texture2D atlas, int frames, Vector2I framePx, float pixelSize, bool fixedY)
     {
-        int k = (int)kind;
-        if (_batches[k] != null) return _batches[k];
-        var def = EnemyDef.For(kind);
-        var fs = Art.EnemyFrameSize(kind);
-        _billboardShader ??= new Shader { Code = BillboardShader };
-        var mat = new ShaderMaterial { Shader = _billboardShader };
-        mat.SetShaderParameter("atlas", Art.Enemy(kind));
-        mat.SetShaderParameter("frames", (float)Art.EnemyFrames);
+        Shader shader = fixedY
+            ? _fixedYShader ??= new Shader { Code = BillboardShader.Replace("BILLBOARD", FixedYBillboard) }
+            : _fullShader ??= new Shader { Code = BillboardShader.Replace("BILLBOARD", FullBillboard) };
+        var mat = new ShaderMaterial { Shader = shader };
+        mat.SetShaderParameter("atlas", atlas);
+        mat.SetShaderParameter("frames", (float)frames);
         var quad = new QuadMesh
         {
-            Size = new Vector2(fs.X, fs.Y) * def.PixelSize,
-            CenterOffset = new Vector3(0, fs.Y * def.PixelSize / 2f, 0),
+            Size = new Vector2(framePx.X, framePx.Y) * pixelSize,
+            // Enemies stand on their origin; projectiles are centred on it.
+            CenterOffset = fixedY ? new Vector3(0, framePx.Y * pixelSize / 2f, 0) : Vector3.Zero,
             Material = mat,
         };
         var mm = new MultiMesh
@@ -92,54 +102,87 @@ void fragment() {
         };
         var node = new MultiMeshInstance3D
         {
-            Name = $"Batch_{def.Name}",
+            Name = name,
             Multimesh = mm,
             CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
             // Instances move every frame; one level-sized box avoids recomputing bounds.
             CustomAabb = new Aabb(new Vector3(-4, -1, -4), new Vector3(_level.Width * Level.Cell + 8, Level.Height + 4, _level.Depth * Level.Cell + 8)),
         };
         AddChild(node);
-        return _batches[k] = new Batch { Node = node, Mesh = mm };
+        return new Batch { Node = node, Mesh = mm };
     }
 
-    /// <summary>Writes every enemy into its type's instance buffer and uploads it (one call per type).</summary>
-    private void FlushBatches()
+    private Batch GetBatch(EnemyKind kind)
     {
-        foreach (var b in _batches)
-            if (b != null) b.Count = 0;
-        foreach (var e in _enemies)
+        int k = (int)kind;
+        var def = EnemyDef.For(kind);
+        return _batches[k] ??= MakeBatch($"Batch_{def.Name}", Art.Enemy(kind), Art.EnemyFrames,
+            Art.EnemyFrameSize(kind), def.PixelSize, true);
+    }
+
+    private Batch GetProjBatch(ProjKind kind)
+    {
+        int k = (int)kind;
+        if (_projBatches[k] != null) return _projBatches[k];
+        var tex = kind switch { ProjKind.Plasma => Art.Plasma(), ProjKind.Rocket => Art.Rocket(), _ => Art.Fireball() };
+        return _projBatches[k] = MakeBatch($"Batch_{kind}", tex, 2, new Vector2I(16, 16), 0.03f, false);
+    }
+
+    private static void Write(Batch b, Vector3 pos, float frame, float light, float gb)
+    {
+        if (b.Count >= b.Capacity)
         {
-            var b = _batches[(int)e.Def.Kind];
-            if (b == null) continue;
-            if (b.Count >= b.Capacity)
-            {
-                b.Capacity = Math.Max(16, b.Capacity * 2);
-                b.Mesh.InstanceCount = b.Capacity; // resets data, rewritten below anyway
-                var nb = new float[b.Capacity * FloatsPerInstance];
-                Array.Copy(b.Buffer, nb, b.Buffer.Length);
-                b.Buffer = nb;
-                b.Visible = -1;
-            }
-            int o = b.Count++ * FloatsPerInstance;
-            var buf = b.Buffer;
-            buf[o] = 1; buf[o + 1] = 0; buf[o + 2] = 0; buf[o + 3] = e.Pos.X;
-            buf[o + 4] = 0; buf[o + 5] = 1; buf[o + 6] = 0; buf[o + 7] = e.Pos.Y;
-            buf[o + 8] = 0; buf[o + 9] = 0; buf[o + 10] = 1; buf[o + 11] = e.Pos.Z;
-            buf[o + 12] = e.Frame;
-            buf[o + 13] = e.Light;
-            buf[o + 14] = e.Flash > 0 ? 0.8f : 1f;
-            buf[o + 15] = 0;
+            b.Capacity = Math.Max(16, b.Capacity * 2);
+            b.Mesh.InstanceCount = b.Capacity; // resets the data; the whole buffer is uploaded anyway
+            var nb = new float[b.Capacity * FloatsPerInstance];
+            Array.Copy(b.Buffer, nb, b.Buffer.Length);
+            b.Buffer = nb;
+            b.Visible = -1;
         }
-        foreach (var b in _batches)
+        int o = b.Count++ * FloatsPerInstance;
+        var buf = b.Buffer;
+        buf[o] = 1; buf[o + 1] = 0; buf[o + 2] = 0; buf[o + 3] = pos.X;
+        buf[o + 4] = 0; buf[o + 5] = 1; buf[o + 6] = 0; buf[o + 7] = pos.Y;
+        buf[o + 8] = 0; buf[o + 9] = 0; buf[o + 10] = 1; buf[o + 11] = pos.Z;
+        buf[o + 12] = frame;
+        buf[o + 13] = light;
+        buf[o + 14] = gb;
+        buf[o + 15] = 0;
+    }
+
+    private static void Upload(Batch[] batches)
+    {
+        foreach (var b in batches)
         {
             if (b == null) continue;
-            if (b.Capacity > 0) b.Mesh.Buffer = b.Buffer;
+            // Skip the upload when nothing is or was visible (e.g. no projectiles in flight).
+            if (b.Capacity > 0 && (b.Count > 0 || b.Visible != 0)) b.Mesh.Buffer = b.Buffer;
             if (b.Count != b.Visible)
             {
                 b.Visible = b.Count;
                 b.Mesh.VisibleInstanceCount = b.Count;
             }
         }
+    }
+
+    /// <summary>
+    /// Writes every enemy and projectile into its type's instance buffer and uploads each buffer
+    /// with one call (MultiMesh.Buffer).
+    /// </summary>
+    private void FlushBatches()
+    {
+        foreach (var b in _batches)
+            if (b != null) b.Count = 0;
+        foreach (var e in _enemies)
+            Write(_batches[(int)e.Def.Kind], e.Pos, e.Frame, e.Light, e.Flash > 0 ? 0.8f : 1f);
+        Upload(_batches);
+
+        foreach (var b in _projBatches)
+            if (b != null) b.Count = 0;
+        if (_projActive > 0)
+            foreach (var p in _proj)
+                if (p.Active) Write(_projBatches[(int)p.Kind], p.Pos, p.Frame, 1f, 1f);
+        Upload(_projBatches);
     }
 
     public sealed class Enemy
@@ -214,6 +257,7 @@ void fragment() {
     private float _fieldAge;
 
     private PhysicsRayQueryParameters3D _ray;
+    private PhysicsDirectSpaceState3D _space; // fetched once per frame, only if a ray is cast
     private OmniLight3D _blastLight;
     private float _blastTime;
     private float _statTimer;
@@ -328,6 +372,7 @@ void fragment() {
         float dt = Mathf.Min((float)delta, 0.05f);
         var player = Game.Player;
         _raysThisFrame = 0;
+        _space = null;
 
         if (!Game.Frozen && player != null)
         {
@@ -342,8 +387,8 @@ void fragment() {
                 if (e.State is not (EState.Dying or EState.Dead)) alive++;
             }
             AliveCount = alive;
-            if (Batched) FlushBatches();
             UpdateProjectiles(player, dt);
+            if (Batched) FlushBatches();
             UpdatePickups(player);
         }
         UpdateEffects(dt);
@@ -423,7 +468,8 @@ void fragment() {
         _raysTotal++;
         _ray.From = from;
         _ray.To = to;
-        var hit = GetWorld3D().DirectSpaceState.IntersectRay(_ray);
+        _space ??= GetWorld3D().DirectSpaceState;
+        var hit = _space.IntersectRay(_ray);
         return hit.Count == 0;
     }
 
@@ -765,12 +811,14 @@ void fragment() {
         foreach (var q in _proj)
             if (!q.Active) { p = q; break; }
         if (p == null) return; // pool exhausted (only happens in big stress runs)
-        if (p.Node == null)
+        if (Batched)
+            GetProjBatch(kind);
+        else if (p.Node == null)
         {
             p.Node = MakeSprite(Art.Fireball(), 2, 0.03f, BaseMaterial3D.BillboardModeEnum.Enabled);
             AddChild(p.Node);
         }
-        if (p.Kind != kind || !p.Node.Visible)
+        if (!Batched && (p.Kind != kind || !p.Node.Visible))
         {
             p.Node.Texture = kind switch
             {
@@ -786,15 +834,18 @@ void fragment() {
         p.FromPlayer = fromPlayer;
         p.Life = 6f;
         p.Active = true;
-        p.Node.Position = pos;
-        p.Node.Visible = true;
+        if (p.Node != null)
+        {
+            p.Node.Position = pos;
+            p.Node.Visible = true;
+        }
         _projActive++;
     }
 
     private void KillProjectile(Projectile p)
     {
         p.Active = false;
-        p.Node.Visible = false;
+        if (p.Node != null) p.Node.Visible = false;
         _projActive--;
     }
 
@@ -841,13 +892,13 @@ void fragment() {
             }
 
             p.Pos = next;
-            p.Node.Position = next;
             int frame = (int)(p.Life * 12f) & 1;
-            if (frame != p.Frame)
+            if (p.Node != null)
             {
-                p.Frame = frame;
-                p.Node.Frame = frame;
+                p.Node.Position = next;
+                if (frame != p.Frame) p.Node.Frame = frame;
             }
+            p.Frame = frame;
         }
     }
 
