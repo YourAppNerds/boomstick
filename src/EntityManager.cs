@@ -44,6 +44,7 @@ public partial class EntityManager : Node3D
 
     private readonly Batch[] _projBatches = new Batch[3];
     private Batch _pickupBatch;
+    private readonly Dictionary<Texture2D, Batch> _fxBatches = new();
     private bool _pickupsDirty;
 
     // Fixed-Y billboard (enemies), same maths as BaseMaterial3D's BILLBOARD_FIXED_Y.
@@ -54,9 +55,11 @@ public partial class EntityManager : Node3D
 		vec4(normalize(cross(INV_VIEW_MATRIX[0].xyz, vec3(0.0, 1.0, 0.0))), 0.0),
 		MODEL_MATRIX[3]);";
 
-    // Full billboard (projectiles), same maths as BaseMaterial3D's BILLBOARD_ENABLED.
+    // Full billboard (projectiles, hit effects), same maths as BaseMaterial3D's BILLBOARD_ENABLED,
+    // keeping the instance's uniform scale (effects come in different pixel sizes).
     private const string FullBillboard = @"
-	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(INV_VIEW_MATRIX[0], INV_VIEW_MATRIX[1], INV_VIEW_MATRIX[2], MODEL_MATRIX[3]);";
+	float s = length(MODEL_MATRIX[0].xyz);
+	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(INV_VIEW_MATRIX[0] * s, INV_VIEW_MATRIX[1] * s, INV_VIEW_MATRIX[2] * s, MODEL_MATRIX[3]);";
 
     private const string BillboardShader = @"
 shader_type spatial;
@@ -130,7 +133,7 @@ void fragment() {
         return _projBatches[k] = MakeBatch($"Batch_{kind}", tex, 2, new Vector2I(16, 16), 0.03f, false);
     }
 
-    private static void Write(Batch b, Vector3 pos, float frame, float light, float gb)
+    private static void Write(Batch b, Vector3 pos, float frame, float light, float gb, float scale = 1f)
     {
         if (b.Count >= b.Capacity)
         {
@@ -143,9 +146,9 @@ void fragment() {
         }
         int o = b.Count++ * FloatsPerInstance;
         var buf = b.Buffer;
-        buf[o] = 1; buf[o + 1] = 0; buf[o + 2] = 0; buf[o + 3] = pos.X;
-        buf[o + 4] = 0; buf[o + 5] = 1; buf[o + 6] = 0; buf[o + 7] = pos.Y;
-        buf[o + 8] = 0; buf[o + 9] = 0; buf[o + 10] = 1; buf[o + 11] = pos.Z;
+        buf[o] = scale; buf[o + 1] = 0; buf[o + 2] = 0; buf[o + 3] = pos.X;
+        buf[o + 4] = 0; buf[o + 5] = scale; buf[o + 6] = 0; buf[o + 7] = pos.Y;
+        buf[o + 8] = 0; buf[o + 9] = 0; buf[o + 10] = scale; buf[o + 11] = pos.Z;
         buf[o + 12] = frame;
         buf[o + 13] = light;
         buf[o + 14] = gb;
@@ -240,7 +243,9 @@ void fragment() {
 
     private sealed class Effect
     {
-        public Sprite3D Node;
+        public Batch Batch;
+        public Vector3 Pos;
+        public float Scale;
         public float Time, Duration;
         public bool Active;
         public int Frames;
@@ -302,12 +307,7 @@ void fragment() {
         for (int i = 0; i < MaxProjectiles; i++)
             _proj[i] = new Projectile();
         for (int i = 0; i < MaxEffects; i++)
-        {
-            var node = MakeSprite(Art.Puff(), 4, 0.04f, BaseMaterial3D.BillboardModeEnum.Enabled);
-            node.Visible = false;
-            AddChild(node);
-            _fx[i] = new Effect { Node = node };
-        }
+            _fx[i] = new Effect();
     }
 
     private static Sprite3D MakeSprite(Texture2D tex, int frames, float pixelSize, BaseMaterial3D.BillboardModeEnum billboard)
@@ -967,12 +967,16 @@ void fragment() {
     {
         var fx = _fx[_fxNext];
         _fxNext = (_fxNext + 1) % MaxEffects;
-        fx.Node.Texture = atlas;
-        fx.Node.Hframes = frames;
-        fx.Node.PixelSize = pixelSize;
-        fx.Node.Frame = 0;
-        fx.Node.Position = at;
-        fx.Node.Visible = true;
+        // One MultiMesh per effect atlas (puff, blood, explosion, plasma), sized per instance.
+        if (!_fxBatches.TryGetValue(atlas, out var batch))
+        {
+            var px = new Vector2I(atlas.GetWidth() / frames, atlas.GetHeight());
+            batch = MakeBatch($"Batch_fx{_fxBatches.Count}", atlas, frames, px, 1f, false);
+            _fxBatches[atlas] = batch;
+        }
+        fx.Batch = batch;
+        fx.Pos = at;
+        fx.Scale = pixelSize;
         fx.Frame = 0;
         fx.Frames = frames;
         fx.Time = 0;
@@ -989,16 +993,16 @@ void fragment() {
             if (fx.Time >= fx.Duration)
             {
                 fx.Active = false;
-                fx.Node.Visible = false;
                 continue;
             }
-            int f = Mathf.Min(fx.Frames - 1, (int)(fx.Time / fx.Duration * fx.Frames));
-            if (f != fx.Frame)
-            {
-                fx.Frame = f;
-                fx.Node.Frame = f;
-            }
+            fx.Frame = Mathf.Min(fx.Frames - 1, (int)(fx.Time / fx.Duration * fx.Frames));
         }
+        foreach (var b in _fxBatches.Values)
+            b.Count = 0;
+        foreach (var fx in _fx)
+            if (fx.Active) Write(fx.Batch, fx.Pos, fx.Frame, 1f, 1f, fx.Scale);
+        foreach (var b in _fxBatches.Values)
+            if (b.Count > 0 || b.Visible != 0) Upload(new[] { b });
         if (_blastTime > 0)
         {
             _blastTime -= dt;

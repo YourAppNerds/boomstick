@@ -26,6 +26,7 @@ public partial class Main : Node3D
     private EntityManager _entities;
     private Node3D _dummies;
     private StartScreen _startScreen;
+    private bool _devView; // a dev argument was given: skip the title screen (screenshots)
     private int _dummyCount;
     private int _stressEnemies;
     private bool _complete;
@@ -164,7 +165,7 @@ public partial class Main : Node3D
         long t0 = Perf.Now;
         bool playing = !_complete && !_player.Dead;
         bool waiting = Game.TouchMode ? !Game.Started : Input.MouseMode != Input.MouseModeEnum.Captured;
-        _startScreen.Refresh(playing && waiting, (float)delta);
+        _startScreen.Refresh(playing && waiting && !_devView, (float)delta);
         if (playing && Game.Started)
             Game.LevelTime += delta;
         Perf.AddProcess(t0);
@@ -196,6 +197,8 @@ public partial class Main : Node3D
     {
         foreach (var arg in OS.GetCmdlineUserArgs())
         {
+            if (arg.StartsWith("--warp") || arg == "--autofire")
+                _devView = true;
             if (arg.StartsWith("--warp="))
             {
                 var v = arg.Substring(7).Split(',');
