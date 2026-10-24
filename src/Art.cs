@@ -328,6 +328,24 @@ public static class Art
 
     public static ImageTexture Pickup(PickupKind kind) => _pickups[(int)kind] ??= BuildPickup(kind);
 
+    public static readonly Vector2I PickupFrameSize = new(32, 24);
+    private static ImageTexture _pickupAtlas;
+
+    /// <summary>Every pickup side by side (frame = PickupKind), for the batched pickup MultiMesh.</summary>
+    public static ImageTexture PickupAtlas()
+    {
+        if (_pickupAtlas != null) return _pickupAtlas;
+        int n = (int)PickupKind.Count, w = PickupFrameSize.X, h = PickupFrameSize.Y;
+        var atlas = Image.CreateEmpty(w * n, h, false, Image.Format.Rgba8);
+        for (int i = 0; i < n; i++)
+        {
+            var img = Pickup((PickupKind)i).GetImage();
+            img.Convert(Image.Format.Rgba8);
+            atlas.BlitRect(img, new Rect2I(0, 0, w, h), new Vector2I(i * w, 0));
+        }
+        return _pickupAtlas = ImageTexture.CreateFromImage(atlas);
+    }
+
     private static ImageTexture BuildPickup(PickupKind kind)
     {
         var p = new Pix(32, 24);

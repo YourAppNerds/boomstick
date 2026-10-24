@@ -43,6 +43,8 @@ public partial class EntityManager : Node3D
     private readonly Batch[] _batches = new Batch[3];
 
     private readonly Batch[] _projBatches = new Batch[3];
+    private Batch _pickupBatch;
+    private bool _pickupsDirty;
 
     // Fixed-Y billboard (enemies), same maths as BaseMaterial3D's BILLBOARD_FIXED_Y.
     private const string FixedYBillboard = @"
@@ -185,6 +187,19 @@ void fragment() {
         Upload(_projBatches);
     }
 
+    /// <summary>Pickups never move: their instance buffer is re-uploaded only when one is spawned or taken.</summary>
+    private void FlushPickups()
+    {
+        if (_pickupsDirty && _pickupBatch != null)
+        {
+            _pickupsDirty = false;
+            _pickupBatch.Count = 0;
+            foreach (var k in _pickups)
+                if (!k.Taken) Write(_pickupBatch, k.Pos, (int)k.Kind, k.Light, 1f);
+            Upload(new[] { _pickupBatch });
+        }
+    }
+
     public sealed class Enemy
     {
         public EnemyDef Def;
@@ -234,8 +249,8 @@ void fragment() {
     private sealed class Pickup
     {
         public PickupKind Kind;
-        public Sprite3D Node;
         public Vector3 Pos;
+        public float Light;
         public bool Taken;
     }
 
@@ -340,13 +355,10 @@ void fragment() {
 
     public void SpawnPickup(PickupKind kind, Vector3 pos)
     {
-        var node = MakeSprite(Art.Pickup(kind), 1, 0.03f, BaseMaterial3D.BillboardModeEnum.FixedY);
-        node.Offset = new Vector2(0, 12);
-        node.Position = pos;
-        float l = _level.LightAt(Level.CellOf(pos));
-        node.Modulate = new Color(l, l, l);
-        AddChild(node);
-        _pickups.Add(new Pickup { Kind = kind, Node = node, Pos = pos });
+        // All pickups share one MultiMesh (frame = kind), like the enemies: one draw call in total.
+        _pickupBatch ??= MakeBatch("Batch_pickups", Art.PickupAtlas(), (int)PickupKind.Count, Art.PickupFrameSize, 0.03f, true);
+        _pickups.Add(new Pickup { Kind = kind, Pos = pos, Light = _level.LightAt(Level.CellOf(pos)) });
+        _pickupsDirty = true;
     }
 
     /// <summary>Removes every enemy and in-flight projectile (stress test reset).</summary>
@@ -390,6 +402,7 @@ void fragment() {
             UpdateProjectiles(player, dt);
             if (Batched) FlushBatches();
             UpdatePickups(player);
+            FlushPickups();
         }
         UpdateEffects(dt);
 
@@ -961,7 +974,7 @@ void fragment() {
             if (dx * dx + dz * dz > 1.0f) continue;
             if (!player.TryPickup(k.Kind)) continue;
             k.Taken = true;
-            k.Node.Visible = false;
+            _pickupsDirty = true;
         }
     }
 }
