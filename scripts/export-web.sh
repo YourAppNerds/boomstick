@@ -20,14 +20,17 @@ touch "$ROOT/build/.gdignore"
 rm -f "$OUT"/*
 
 echo "== import + build solutions"
+# On a fresh checkout the import runs before the C# assembly exists and logs "Failed to create an
+# autoload ... is not compiling". That is expected, so only the export step below is checked.
 "$GODOT" --headless --path "$ROOT" --import > "$LOG" 2>&1
 "$GODOT" --headless --path "$ROOT" --build-solutions --quit >> "$LOG" 2>&1
+export_from=$(( $(wc -l < "$LOG") + 1 ))
 
 echo "== export release (Web, nothreads)"
 start=$(date +%s)
 "$GODOT" --headless --path "$ROOT" --export-release "Web" "$OUT/index.html" >> "$LOG" 2>&1
 echo "export took $(( $(date +%s) - start ))s, log: $LOG"
-if grep -E "ERROR|SCRIPT ERROR" "$LOG"; then
+if tail -n "+$export_from" "$LOG" | grep -E "ERROR|SCRIPT ERROR"; then
     echo "export log contains errors, failing" >&2
     exit 1
 fi
