@@ -38,9 +38,11 @@ public partial class DebugOverlay : CanvasLayer
         public double CsProcess;
         public double CsPhysics;
         public int PhysicsSteps;
+        public double EngineProcess;
 
-        public void Add(double dt, double proc, double phys, int steps)
+        public void Add(double dt, double proc, double phys, int steps, double engineProc)
         {
+            EngineProcess += engineProc;
             Frames++;
             Time += dt;
             if (dt > MaxFrame) MaxFrame = dt;
@@ -53,6 +55,7 @@ public partial class DebugOverlay : CanvasLayer
         public double AvgFrameMs => Frames > 0 ? Time * 1000.0 / Frames : 0;
         public double AvgProcMs => Frames > 0 ? CsProcess / Frames : 0;
         public double AvgPhysMs => Frames > 0 ? CsPhysics / Frames : 0;
+        public double AvgEngineProcMs => Frames > 0 ? EngineProcess / Frames : 0;
     }
 
     /// <summary>Adds or updates an extra line in the overlay ("key: value").</summary>
@@ -97,8 +100,10 @@ public partial class DebugOverlay : CanvasLayer
     public override void _Process(double delta)
     {
         Perf.Drain(out double proc, out double phys, out int steps);
-        _window.Add(delta, proc, phys, steps);
-        _bench.Add(delta, proc, phys, steps);
+        // Engine-measured time of the previous frame's process step (includes native->C# call overhead).
+        double engineProc = Performance.GetMonitor(Performance.Monitor.TimeProcess) * 1000.0;
+        _window.Add(delta, proc, phys, steps, engineProc);
+        _bench.Add(delta, proc, phys, steps, engineProc);
         _sinceDisplay += delta;
         _sinceLog += delta;
 
@@ -122,7 +127,7 @@ public partial class DebugOverlay : CanvasLayer
         _sb.Clear();
         _sb.Append($"FPS {w.Fps:0.0}   frame {w.AvgFrameMs:0.00} ms (max {w.MaxFrame * 1000:0.0})\n");
         _sb.Append($"C# _Process {w.AvgProcMs:0.000} ms/f   _Physics {w.AvgPhysMs:0.000} ms/f ({w.PhysicsSteps} steps)\n");
-        _sb.Append($"engine process {Performance.GetMonitor(Performance.Monitor.TimeProcess) * 1000:0.00} ms   physics {Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000:0.00} ms\n");
+        _sb.Append($"engine process {w.AvgEngineProcMs:0.00} ms   physics {Performance.GetMonitor(Performance.Monitor.TimePhysicsProcess) * 1000:0.00} ms\n");
         _sb.Append($"nodes {Performance.GetMonitor(Performance.Monitor.ObjectNodeCount):0}   objects {Performance.GetMonitor(Performance.Monitor.ObjectCount):0}   draw calls {Performance.GetMonitor(Performance.Monitor.RenderTotalDrawCallsInFrame):0}\n");
         _sb.Append($"GC gen0 {GC.CollectionCount(0)}  gen1 {GC.CollectionCount(1)}  gen2 {GC.CollectionCount(2)}   managed {GC.GetTotalMemory(false) / (1024.0 * 1024.0):0.00} MiB\n");
         foreach (var kv in Extra)
@@ -133,7 +138,7 @@ public partial class DebugOverlay : CanvasLayer
 
     private string Summarize(in Window w) =>
         $"fps={w.Fps:0.0} frame_ms={w.AvgFrameMs:0.00} max_ms={w.MaxFrame * 1000:0.0} " +
-        $"cs_process_ms={w.AvgProcMs:0.000} cs_physics_ms={w.AvgPhysMs:0.000} frames={w.Frames} " +
+        $"cs_process_ms={w.AvgProcMs:0.000} cs_physics_ms={w.AvgPhysMs:0.000} engine_process_ms={w.AvgEngineProcMs:0.000} frames={w.Frames} " +
         $"nodes={Performance.GetMonitor(Performance.Monitor.ObjectNodeCount):0} " +
         $"gc={GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} " +
         $"managed_mib={GC.GetTotalMemory(false) / (1024.0 * 1024.0):0.00}";
