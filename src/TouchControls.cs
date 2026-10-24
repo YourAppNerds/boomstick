@@ -83,6 +83,7 @@ public partial class TouchControls : CanvasLayer
     {
         if (e is InputEventScreenTouch touch)
         {
+            Sfx.Unlock();
             if (!Game.TouchMode)
             {
                 Game.TouchMode = true;

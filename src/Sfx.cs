@@ -6,13 +6,18 @@ namespace Boomstick;
 public enum Snd
 {
     Pistol, Shotgun, Pump, RocketFire, Explosion, Fireball, Plasma, ProjHit, Alert, Pain, Death,
-    Swipe, PlayerHurt, PlayerDeath, Item, WeaponPickup, Click, LevelDone, Count,
+    Swipe, PlayerHurt, PlayerDeath, Item, WeaponPickup, Click, LevelDone, Footstep, Count,
 }
 
 /// <summary>
 /// Procedurally synthesized sound effects (generated once into 16-bit AudioStreamWAVs) played
 /// through a small pool of AudioStreamPlayers. Positional sounds are attenuated by distance to
 /// the player in C#; there is no AudioStreamPlayer3D per entity.
+///
+/// Every sound has a mix level (<see cref="Mix"/>) and a little random pitch, so repeated shots
+/// and growls don't sound identical. At most <see cref="MaxSame"/> copies of one sound play at
+/// once. On the web nothing plays until the first key, click or tap: browsers refuse to start
+/// audio before a user gesture and log a warning for every attempt.
 /// </summary>
 public partial class Sfx : Node
 {
@@ -25,6 +30,41 @@ public partial class Sfx : Node
     private readonly AudioStreamPlayer[] _players = new AudioStreamPlayer[Voices];
     private readonly ulong[] _started = new ulong[Voices];
     private int _next;
+
+    /// <summary>Mix level in dB per sound, applied on top of the caller's volume.</summary>
+    private static readonly float[] Mix = new float[(int)Snd.Count];
+
+    /// <summary>Random pitch range per sound (0 = always the same pitch, for jingles).</summary>
+    private static readonly float[] Jitter = new float[(int)Snd.Count];
+
+    private const int MaxSame = 3;
+
+    /// <summary>False on the web until the first user gesture; always true on desktop.</summary>
+    public static bool Unlocked { get; private set; } = !OS.HasFeature("web");
+
+    static Sfx()
+    {
+        void Set(Snd s, float db, float jitter) { Mix[(int)s] = db; Jitter[(int)s] = jitter; }
+        Set(Snd.Pistol, -3f, 0.05f);
+        Set(Snd.Shotgun, 0f, 0.04f);
+        Set(Snd.Pump, -5f, 0.03f);
+        Set(Snd.RocketFire, -2f, 0.04f);
+        Set(Snd.Explosion, 1f, 0.08f);
+        Set(Snd.Fireball, -4f, 0.08f);
+        Set(Snd.Plasma, -7f, 0.06f);
+        Set(Snd.ProjHit, -5f, 0.1f);
+        Set(Snd.Alert, -3f, 0.06f);
+        Set(Snd.Pain, -4f, 0.06f);
+        Set(Snd.Death, -2f, 0.06f);
+        Set(Snd.Swipe, -5f, 0.1f);
+        Set(Snd.PlayerHurt, -3f, 0.05f);
+        Set(Snd.PlayerDeath, 0f, 0f);
+        Set(Snd.Item, -6f, 0f);
+        Set(Snd.WeaponPickup, -4f, 0f);
+        Set(Snd.Click, -6f, 0.05f);
+        Set(Snd.LevelDone, -2f, 0f);
+        Set(Snd.Footstep, -15f, 0.12f);
+    }
 
     public override void _Ready()
     {
@@ -40,6 +80,19 @@ public partial class Sfx : Node
     public override void _ExitTree()
     {
         if (Instance == this) Instance = null;
+    }
+
+    /// <summary>
+    /// Allows sound after a user gesture. The engine resumes the web AudioContext inside its key,
+    /// mouse button and touch callbacks. Nodes that mark those events as handled (the mouse
+    /// capture click, the touch controls) call this themselves, since the event never reaches us.
+    /// </summary>
+    public static void Unlock() => Unlocked = true;
+
+    public override void _Input(InputEvent e)
+    {
+        if (!Unlocked && e is InputEventKey { Pressed: true } or InputEventMouseButton { Pressed: true } or InputEventScreenTouch { Pressed: true })
+            Unlock();
     }
 
     /// <summary>Plays a sound at full volume (player weapons, pickups, UI).</summary>
@@ -58,20 +111,28 @@ public partial class Sfx : Node
 
     private void PlayVoice(Snd s, float db, float pitch)
     {
-        // Prefer a free voice; otherwise steal the oldest one.
-        int pick = -1;
+        if (!Unlocked) return;
+        var stream = _streams[(int)s];
+        // Prefer a free voice; otherwise steal the oldest one. Skip the sound if it is already
+        // playing MaxSame times (a horde waking up at once).
+        int pick = -1, same = 0;
         ulong oldest = ulong.MaxValue;
         int oldestIdx = 0;
         for (int k = 0; k < Voices; k++)
         {
             int i = (_next + k) % Voices;
-            if (!_players[i].Playing) { pick = i; break; }
+            var v = _players[i];
+            if (!v.Playing) { if (pick < 0) pick = i; continue; }
+            if (v.Stream == stream && ++same >= MaxSame) return;
             if (_started[i] < oldest) { oldest = _started[i]; oldestIdx = i; }
         }
         if (pick < 0) pick = oldestIdx;
+        float j = Jitter[(int)s];
+        if (j > 0f) pitch *= 1f + ((float)Game.Rng.NextDouble() * 2f - 1f) * j;
+        db += Mix[(int)s];
         _next = (pick + 1) % Voices;
         var p = _players[pick];
-        p.Stream = _streams[(int)s];
+        p.Stream = stream;
         p.VolumeDb = db;
         p.PitchScale = pitch;
         p.Play();
@@ -122,6 +183,8 @@ public partial class Sfx : Node
         a[(int)Snd.LevelDone] = Synth(1.4f, (t, s) =>
             (Square(t, Arp(t, 0.14f, 523f, 659f, 784f, 1047f, 784f, 1047f, 1047f, 1047f, 1047f, 1047f)) * 0.18f +
              Sine(t, Arp(t, 0.14f, 262f, 330f, 392f, 523f, 392f, 523f, 523f, 523f, 523f, 523f)) * 0.25f) * Env(t, 1.6f));
+        a[(int)Snd.Footstep] = Synth(0.12f, (t, s) =>
+            s.Lp(Noise(), 0.12f) * Env(t, 38f) * 1.6f + Sine(t, 70f - t * 120f) * Env(t, 45f) * 0.6f);
         return a;
     }
 

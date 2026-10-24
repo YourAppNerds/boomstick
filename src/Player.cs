@@ -86,6 +86,7 @@ public partial class Player : CharacterBody3D
             // to keyboard and mouse controls.
             Game.TouchMode = false;
             Game.Started = true;
+            Sfx.Unlock();
             Input.MouseMode = Input.MouseModeEnum.Captured;
             _capturedAt = Time.GetTicksMsec();
             GetViewport().SetInputAsHandled();
@@ -169,7 +170,11 @@ public partial class Player : CharacterBody3D
         MoveFactor = IsOnFloor() ? Mathf.Min(hspeed / WalkSpeed, 1.5f) : 0f;
         if (IsOnFloor() && hspeed > 0.5f)
         {
+            // A footstep each time the bob passes its low point (every half cycle).
+            int step = (int)(_bobPhase / Mathf.Pi);
             _bobPhase += dt * hspeed * 1.6f;
+            if ((int)(_bobPhase / Mathf.Pi) != step && !Dead)
+                Sfx.Play(Snd.Footstep, Mathf.LinearToDb(Mathf.Clamp(hspeed / SprintSpeed, 0.4f, 1f)));
             float k = MoveFactor;
             target = new Vector3(Mathf.Cos(_bobPhase) * BobAmount * 0.5f * k, Mathf.Abs(Mathf.Sin(_bobPhase)) * BobAmount * k, 0);
         }
