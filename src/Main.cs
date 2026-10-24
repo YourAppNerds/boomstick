@@ -8,7 +8,7 @@ namespace Boomstick;
 /// Root of the game scene: sets up input actions, environment, level, player, the stress-test
 /// dummies (F4 adds 50, F5 clears) and an optional scripted stress run.
 /// Scripted stress run: pass "-- --autostress" on the command line, or add "?autostress" to the
-/// page URL on web. It steps through dummy counts and prints one "STRESS" line per step.
+/// page URL on web (append "=N" for N steps of 50). It steps through dummy counts and prints one "STRESS" line per step.
 /// </summary>
 public partial class Main : Node3D
 {
@@ -32,7 +32,7 @@ public partial class Main : Node3D
 
         _player = new Player { Name = "Player", Position = _level.PlayerStart + new Vector3(0, 0.1f, 0) };
         AddChild(_player);
-        _player.Rotation = new Vector3(0, Mathf.Pi * 0.5f, 0); // face east, down the first room
+        _player.Rotation = new Vector3(0, -Mathf.Pi * 0.5f, 0); // face east, down the first room
 
         _dummies = new Node3D { Name = "Dummies" };
         AddChild(_dummies);
@@ -40,11 +40,15 @@ public partial class Main : Node3D
         SetupHud();
         DebugOverlay.SetStat("dummies", "0");
 
-        GD.Print($"BOOMSTICK READY ({OS.GetName()}, {RenderingServer.GetVideoAdapterName()}, " +
+        // Do not touch RenderingServer from C# here: on the web template its static constructor
+        // throws NativeMethodBindNotFoundException (get_video_adapter_type hash mismatch, because
+        // the web build has rendering_device disabled). See logs/step7d1-report.md.
+        GD.Print($"BOOMSTICK READY ({OS.GetName()}, " +
                  $".NET {System.Environment.Version}, map {_level.Width}x{_level.Depth}, {_level.OpenCells.Count} open cells)");
 
-        if (WantsAutostress())
-            RunAutostress();
+        int stressSteps = AutostressSteps();
+        if (stressSteps > 0)
+            RunAutostress(stressSteps);
     }
 
     private static void AddKeyAction(string name, params Key[] keys)
@@ -75,7 +79,7 @@ public partial class Main : Node3D
             BackgroundColor = new Color(0.02f, 0.02f, 0.03f),
             AmbientLightSource = Godot.Environment.AmbientSource.Color,
             AmbientLightColor = new Color(0.55f, 0.5f, 0.48f),
-            AmbientLightEnergy = 0.35f,
+            AmbientLightEnergy = 0.5f,
             FogEnabled = true,
             FogLightColor = new Color(0.05f, 0.04f, 0.04f),
             FogDensity = 0.03f,
@@ -148,23 +152,35 @@ public partial class Main : Node3D
         DebugOverlay.SetStat("dummies", "0");
     }
 
-    private static bool WantsAutostress()
+    /// <summary>
+    /// Returns the number of autostress steps (0 = off). Desktop: "-- --autostress[=steps]".
+    /// Web: "?autostress[=steps]" in the page URL. Default is 6 steps (0..300 dummies).
+    /// </summary>
+    private static int AutostressSteps()
     {
-        if (OS.GetCmdlineUserArgs().Contains("--autostress"))
-            return true;
-        if (OS.HasFeature("web"))
+        string spec = null;
+        foreach (var arg in OS.GetCmdlineUserArgs())
+            if (arg.StartsWith("--autostress"))
+                spec = arg.Substring("--autostress".Length);
+        if (spec == null && OS.HasFeature("web"))
         {
-            var search = JavaScriptBridge.Eval("window.location.search", true).AsString();
-            return search != null && search.Contains("autostress");
+            var search = JavaScriptBridge.Eval("window.location.search", true).AsString() ?? "";
+            int at = search.IndexOf("autostress", StringComparison.Ordinal);
+            if (at >= 0)
+            {
+                spec = search.Substring(at + "autostress".Length);
+                int amp = spec.IndexOf('&');
+                if (amp >= 0) spec = spec.Substring(0, amp);
+            }
         }
-        return false;
+        if (spec == null) return 0;
+        return spec.StartsWith("=") && int.TryParse(spec.Substring(1), out int n) && n > 0 ? n : 6;
     }
 
-    private async void RunAutostress()
+    private async void RunAutostress(int steps)
     {
-        const int steps = 6;
         const double secondsPerStep = 4.0;
-        GD.Print("STRESS start");
+        GD.Print($"STRESS start steps={steps}");
         await ToSignal(GetTree().CreateTimer(2.0), SceneTreeTimer.SignalName.Timeout);
         for (int i = 0; i <= steps; i++)
         {
